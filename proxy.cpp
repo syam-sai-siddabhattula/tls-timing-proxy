@@ -5,10 +5,14 @@
 #include <unistd.h>
 #include <openssl/ssl.h>
 #include <openssl/err.h>
-#include <sys/select.h>
+#include <fstream>
 
 #define BUFFER_SIZE 4096
 #define LISTEN_PORT 8443
+
+#define START_PAYLOAD 128
+#define MAX_PAYLOAD 3000
+#define STEP 128
 
 using Clock = std::chrono::high_resolution_clock;
 
@@ -18,53 +22,42 @@ void init_openssl() {
 }
 
 SSL_CTX* create_server_context(const char* cert, const char* key) {
-    const SSL_METHOD* method = TLS_server_method();
-    SSL_CTX* ctx = SSL_CTX_new(method);
+    SSL_CTX* ctx = SSL_CTX_new(TLS_server_method());
     SSL_CTX_use_certificate_file(ctx, cert, SSL_FILETYPE_PEM);
     SSL_CTX_use_PrivateKey_file(ctx, key, SSL_FILETYPE_PEM);
     return ctx;
 }
 
 SSL_CTX* create_client_context() {
-    const SSL_METHOD* method = TLS_client_method();
-    return SSL_CTX_new(method);
-}
-
-int create_server_socket() {
-    int sock = socket(AF_INET, SOCK_STREAM, 0);
-
-    sockaddr_in addr{};
-    addr.sin_family = AF_INET;
-    addr.sin_port = htons(LISTEN_PORT);
-    addr.sin_addr.s_addr = INADDR_ANY;
-
-    bind(sock, (struct sockaddr*)&addr, sizeof(addr));
-    listen(sock, 1);
-
-    return sock;
-}
-
-int connect_to_server(const char* server_ip, int port) {
-    int sock = socket(AF_INET, SOCK_STREAM, 0);
-
-    sockaddr_in addr{};
-    addr.sin_family = AF_INET;
-    addr.sin_port = htons(port);
-    inet_pton(AF_INET, server_ip, &addr.sin_addr);
-
-    connect(sock, (struct sockaddr*)&addr, sizeof(addr));
-    return sock;
+    SSL_CTX* ctx = SSL_CTX_new(TLS_client_method());
+    SSL_CTX_set_verify(ctx, SSL_VERIFY_NONE, NULL);
+    return ctx;
 }
 
 int main() {
 
     init_openssl();
 
+    std::ofstream logfile("steady_state_results.csv");
+    logfile << "direction,bytes,decrypt_us,encrypt_us,total_us,read_calls\n";
+    logfile.flush();
+
     SSL_CTX* server_ctx = create_server_context("cert.pem", "key.pem");
     SSL_CTX* client_ctx = create_client_context();
 
-    int server_sock = create_server_socket();
-    std::cout << "Waiting for client...\n";
+    int server_sock = socket(AF_INET, SOCK_STREAM, 0);
+    int opt = 1;
+    setsockopt(server_sock, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+
+    sockaddr_in addr{};
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons(LISTEN_PORT);
+    addr.sin_addr.s_addr = INADDR_ANY;
+
+    bind(server_sock, (struct sockaddr*)&addr, sizeof(addr));
+    listen(server_sock, 1);
+
+    std::cout << "Proxy ready...\n";
 
     int client_sock = accept(server_sock, nullptr, nullptr);
 
@@ -72,134 +65,86 @@ int main() {
     SSL_set_fd(ssl_server, client_sock);
     SSL_accept(ssl_server);
 
-    std::cout << "Client connected.\n";
-
-    int remote_sock = connect_to_server("127.0.0.1", 9443);
+    int backend_sock = socket(AF_INET, SOCK_STREAM, 0);
+    sockaddr_in backend_addr{};
+    backend_addr.sin_family = AF_INET;
+    backend_addr.sin_port = htons(9443);
+    inet_pton(AF_INET, "127.0.0.1", &backend_addr.sin_addr);
+    connect(backend_sock, (struct sockaddr*)&backend_addr, sizeof(backend_addr));
 
     SSL* ssl_client = SSL_new(client_ctx);
-    SSL_set_fd(ssl_client, remote_sock);
+    SSL_set_fd(ssl_client, backend_sock);
     SSL_connect(ssl_client);
-
-    std::cout << "Connected to backend server.\n";
 
     char buffer[BUFFER_SIZE];
 
-    auto file_start = Clock::now();
+    size_t expected_payload = START_PAYLOAD;
 
     while (true) {
 
-        fd_set readfds;
-        FD_ZERO(&readfds);
-        FD_SET(client_sock, &readfds);
-        FD_SET(remote_sock, &readfds);
+        size_t total_bytes = 0;
+        long decrypt_total = 0;
+        long encrypt_total = 0;
+        int read_calls = 0;
 
-        int maxfd = std::max(client_sock, remote_sock) + 1;
+        auto total_start = Clock::now();
 
-        // WAITING TIME (Idle time)
-        
-        auto wait_start = Clock::now();
-        int activity = select(maxfd, &readfds, NULL, NULL, NULL);
-        auto wait_end = Clock::now();
+        while (total_bytes < expected_payload) {
 
-        if (activity <= 0)
-            break;
-
-        auto waiting_time =
-            std::chrono::duration_cast<std::chrono::microseconds>(
-                wait_end - wait_start).count();
-
-        // CLIENT toSERVER
-        if (FD_ISSET(client_sock, &readfds)) {
-
-            auto total_start = Clock::now();
-
-            // Decrypt
             auto decrypt_start = Clock::now();
             int bytes = SSL_read(ssl_server, buffer, BUFFER_SIZE);
             auto decrypt_end = Clock::now();
-            if (bytes <= 0) break;
 
-            // Encrypt
+            if (bytes <= 0)
+                goto cleanup;
+
+            read_calls++;
+
+            decrypt_total += std::chrono::duration_cast<std::chrono::microseconds>(
+                decrypt_end - decrypt_start).count();
+
             auto encrypt_start = Clock::now();
             SSL_write(ssl_client, buffer, bytes);
             auto encrypt_end = Clock::now();
 
-            auto decrypt_time =
-                std::chrono::duration_cast<std::chrono::microseconds>(
-                    decrypt_end - decrypt_start).count();
+            encrypt_total += std::chrono::duration_cast<std::chrono::microseconds>(
+                encrypt_end - encrypt_start).count();
 
-            auto encrypt_time =
-                std::chrono::duration_cast<std::chrono::microseconds>(
-                    encrypt_end - encrypt_start).count();
-
-            auto total =
-                std::chrono::duration_cast<std::chrono::microseconds>(
-                    encrypt_end - total_start).count();
-
-            std::cout << "----- CLIENT to SERVER -----\n";
-            std::cout << "Bytes: " << bytes << "\n";
-            std::cout << "Waiting time: " << waiting_time << " us\n";
-            std::cout << "Decrypt time: " << decrypt_time << " us\n";
-            std::cout << "Encrypt time: " << encrypt_time << " us\n";
-            std::cout << "Total forward processing: " << total << " us\n\n";
+            total_bytes += bytes;
         }
 
-        // SERVER to CLIENT
-        if (FD_ISSET(remote_sock, &readfds)) {
+        auto total_end = Clock::now();
+        long total_time =
+            std::chrono::duration_cast<std::chrono::microseconds>(
+                total_end - total_start).count();
 
-            auto total_start = Clock::now();
+        logfile << "forward,"
+                << expected_payload << ","
+                << decrypt_total << ","
+                << encrypt_total << ","
+                << total_time << ","
+                << read_calls << "\n";
 
-            // Decrypt
-            auto decrypt_start = Clock::now();
-            int bytes = SSL_read(ssl_client, buffer, BUFFER_SIZE);
-            auto decrypt_end = Clock::now();
-            if (bytes <= 0) break;
+        logfile.flush();
 
-            // Encrypt
-            auto encrypt_start = Clock::now();
-            SSL_write(ssl_server, buffer, bytes);
-            auto encrypt_end = Clock::now();
+        // Move to next payload size
+        expected_payload += STEP;
 
-            auto decrypt_time =
-                std::chrono::duration_cast<std::chrono::microseconds>(
-                    decrypt_end - decrypt_start).count();
-
-            auto encrypt_time =
-                std::chrono::duration_cast<std::chrono::microseconds>(
-                    encrypt_end - encrypt_start).count();
-
-            auto total =
-                std::chrono::duration_cast<std::chrono::microseconds>(
-                    encrypt_end - total_start).count();
-
-            std::cout << "----- SERVER toCLIENT -----\n";
-            std::cout << "Bytes: " << bytes << "\n";
-            std::cout << "Waiting time: " << waiting_time << " us\n";
-            std::cout << "Decrypt time: " << decrypt_time << " us\n";
-            std::cout << "Encrypt time: " << encrypt_time << " us\n";
-            std::cout << "Total reverse processing: " << total << " us\n\n";
-        }
+        if (expected_payload > MAX_PAYLOAD)
+            expected_payload = START_PAYLOAD;
     }
 
-    auto file_end = Clock::now();
+cleanup:
 
-    auto total_file_time =
-        std::chrono::duration_cast<std::chrono::milliseconds>(
-            file_end - file_start).count();
-
-    std::cout << "---------------------------------------\n";
-    std::cout << "Total file transfer time: "
-              << total_file_time << " ms\n";
-
+    SSL_shutdown(ssl_server);
+    SSL_shutdown(ssl_client);
     SSL_free(ssl_server);
     SSL_free(ssl_client);
     close(client_sock);
-    close(remote_sock);
+    close(backend_sock);
     close(server_sock);
-
     SSL_CTX_free(server_ctx);
     SSL_CTX_free(client_ctx);
-    EVP_cleanup();
 
     return 0;
 }
