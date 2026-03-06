@@ -257,7 +257,7 @@ This script processes the captured `.pcap` files and extracts:
 
 The screenshot below shows the actual packet-level results obtained from the captured traffic.
 
-![Packet Analysis Screenshot](Screenshots/Figure_1.png)
+![Packet Analysis Screenshot](Screenshots/Figure1.png)
 
 ---
 
@@ -306,7 +306,7 @@ This script processes the steady-state result files and computes:
 
 The resulting graph visualizes how MTU configuration influences TLS proxy performance.
 
-![TLS Timing Graph](Screenshots/Figure_2.png)
+![TLS Timing Graph](Screenshots/Figure2.png)
 
 ## Graph Description
 
