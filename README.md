@@ -25,23 +25,97 @@ Reducing MTU increases packet fragmentation, increases packet count, and impacts
 
 ---
 
-# Hardware Setup
+# Reproducibility
 
-## Client Machine
-- Raspberry Pi 3
-- Runs TLS client
-- Sends payloads
-
-## Proxy + Backend Machine
-- Raspberry Pi 5
-- Runs:
-  - TLS Proxy
-  - OpenSSL backend server
-  - tcpdump packet capture
-
-Both connected via Ethernet (`eth0`).
+This section documents the exact hardware and software configuration used in the experiment to ensure scientific reproducibility.
 
 ---
+
+## Hardware Configuration
+
+### Proxy + Backend System (Raspberry Pi 5)
+
+- Model: Raspberry Pi 5 Model B Rev 1.0
+- CPU: ARM Cortex-A76 (4 cores)
+- Maximum Frequency: 2.4 GHz
+- RAM: 8 GB
+- Architecture: aarch64 (64-bit)
+
+---
+
+### Client System (Raspberry Pi 3)
+
+- Model: Raspberry Pi 3 Model B Plus Rev 1.3
+- CPU: ARM Cortex-A53 (4 cores)
+- Maximum Frequency: 1.4 GHz
+- RAM: 1 GB
+- Architecture: aarch64 (64-bit)
+
+---
+
+## Operating System
+
+### Pi 5
+- Distribution: Raspbian GNU/Linux 12 (bookworm)
+- Kernel: 6.12.62+rpt-rpi-v8
+
+### Pi 3
+- Distribution: Debian GNU/Linux 13 (trixie)
+- Kernel: 6.12.62+rpt-rpi-v8
+
+Kernel version is critical because TCP segmentation and networking behavior depend on the Linux networking stack implementation.
+
+---
+
+## Compiler Versions
+
+### Pi 5
+- GCC: 12.2.0
+- G++: 12.2.0
+
+### Pi 3
+- GCC: 14.2.0
+- G++: 14.2.0
+
+---
+
+## OpenSSL Versions
+
+### Pi 5
+- OpenSSL 3.0.18
+- Build date: 30 Sep 2025
+
+### Pi 3
+- OpenSSL 3.5.4
+- Build date: 30 Sep 2025
+
+---
+
+## TLS Configuration
+
+The experiment used TLS 1.2 with the following cipher suite:
+
+Protocol: TLSv1.2  
+Cipher Suite: ECDHE-RSA-AES256-GCM-SHA384  
+
+Details:
+
+- Key Exchange: ECDHE
+- Authentication: RSA (2048-bit certificate)
+- Encryption: AES-256-GCM
+- Hash Function: SHA384
+- Ephemeral Key Exchange: X25519 (253-bit)
+
+Cipher verification was performed using:
+
+```bash
+openssl s_client -connect 127.0.0.1:9443 -tls1_2
+```
+
+The certificate used was a self-signed RSA 2048-bit certificate generated locally for experimental purposes.
+
+---
+
 
 # Software Requirements
 
